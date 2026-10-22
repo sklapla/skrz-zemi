@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Kreslení rukou</title>
+<style>
+:root {
+  --bg: #0d0f12;
+  --panel: rgba(16, 18, 22, .78);
+  --fg: #f2efe8;
+  --muted: #9a9790;
+  --line: rgba(255, 255, 255, .14);
+  --live: #3ddc84;
+  --warn: #ffb547;
+  --ui: -apple-system, "SF Pro Text", system-ui, sans-serif;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 15px/1.4 var(--ui); overflow: hidden; touch-action: none; }
+#stage { position: fixed; inset: 0; }
+#stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+#overlay { pointer-events: none; }
+
+#pip {
+  position: fixed; z-index: 6;
+  right: max(12px, env(safe-area-inset-right, 0px));
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 64px);
+  width: 112px; aspect-ratio: 3 / 4; max-width: 100%;
+  border-radius: 12px; overflow: hidden;
+  border: 1px solid var(--line); background: #000;
+  box-shadow: 0 6px 20px rgba(0,0,0,.5);
+}
+#pip.hidden { display: none; }
+#pip video, #pip canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+
+#bar {
+  position: fixed; left: 0; right: 0; top: 0;
+  padding: calc(env(safe-area-inset-top, 0px) + 8px) max(12px, env(safe-area-inset-right, 0px)) 8px max(12px, env(safe-area-inset-left, 0px));
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  background: var(--panel); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line); z-index: 5;
+}
+.sw { width: 30px; height: 30px; border-radius: 50%; border: 2px solid var(--line); padding: 0; cursor: pointer; }
+.sw[aria-pressed="true"] { border-color: var(--fg); box-shadow: 0 0 0 2px var(--bg) inset; }
+.sep { width: 1px; height: 24px; background: var(--line); }
+button.t {
+  font: 600 13px var(--ui); color: var(--fg); background: rgba(255,255,255,.08);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; cursor: pointer;
+}
+button.t[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+button:focus-visible { outline: 2px solid var(--live); outline-offset: 2px; }
+.grow { flex: 1; }
+
+#status {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
+  font: 600 13px var(--ui); padding: 8px 14px; border-radius: 999px;
+  background: var(--panel); border: 1px solid var(--line); z-index: 5; white-space: nowrap;
+  display: flex; gap: 8px; align-items: center;
+}
+#status i { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); display: inline-block; }
+#status.hand i { background: var(--warn); }
+#status.draw i { background: var(--live); }
+
+#start {
+  position: fixed; inset: 0; z-index: 10; display: grid; place-items: center;
+  padding: 24px; background: var(--bg); text-align: center;
+}
+#start h1 { font: 700 34px/1.1 var(--ui); margin: 0 0 12px; letter-spacing: -.02em; }
+#start p { color: var(--muted); max-width: 34ch; margin: 0 auto 8px; }
+#start ol { text-align: left; color: var(--fg); max-width: 34ch; margin: 16px auto 24px; padding-left: 20px; }
+#go { font: 700 17px var(--ui); padding: 14px 28px; border-radius: 12px; border: 0; background: var(--fg); color: var(--bg); cursor: pointer; }
+#go:disabled { opacity: .5; }
+#err { color: var(--warn); margin-top: 16px; max-width: 34ch; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="paper"></canvas>
+  <canvas id="overlay"></canvas>
+</div>
+<div id="pip" hidden>
+  <video id="cam" playsinline muted autoplay></video>
+  <canvas id="skel"></canvas>
+</div>
+
+<div id="bar" hidden>
+  <div id="colors" style="display:flex;gap:6px"></div>
+  <span class="sep"></span>
+  <button class="t" id="size" type="button">Tloušťka: střední</button>
+  <span class="grow"></span>
+  <button class="t" id="undo" type="button">Zpět</button>
+  <button class="t" id="clear" type="button">Smazat</button>
+  <button class="t" id="camtoggle" type="button" aria-pressed="true">Kamera</button>
+  <button class="t" id="save" type="button">Uložit</button>
+</div>
+
+<div id="status" hidden><i></i><span id="statustext">Hledám ruku…</span></div>
+
+<div id="start">
+  <div>
+    <h1>Kreslení rukou</h1>
+    <p>Přední kamera sleduje ruku. Kreslíš ve vzduchu a čára se kreslí na displej.</p>
+    <ol>
+      <li>Polož telefon nebo ho drž asi 40–60 cm od sebe.</li>
+      <li>Ukazovák je štětec.</li>
+      <li>Spoj palec a ukazovák = kreslí.</li>
+      <li>Roztáhni prsty = štětec nahoře.</li>
+    </ol>
+    <button id="go" type="button">Spustit kameru</button>
+    <div id="err"></div>
+  </div>
+</div>
+
+<script type="module">
+import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+const MODEL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+
+const COLORS = ["#ffffff", "#ff5a4e", "#ffc23d", "#3ddc84", "#3db8ff", "#b77cff"];
+const SIZES = [["tenká", 4], ["střední", 10], ["tlustá", 22]];
+
+// Pinch thresholds: thumb-tip to index-tip distance divided by hand size.
+// Two thresholds (hysteresis) so the line does not flicker on/off.
+const PINCH_ON = 0.32;
+const PINCH_OFF = 0.48;
+const SMOOTH = 0.45;      // 0 = no smoothing, 1 = frozen
+const LOST_FRAMES = 6;    // frames without a hand before the stroke ends
+
+const $ = (id) => document.getElementById(id);
+const video = $("cam"), paper = $("paper"), overlay = $("overlay");
+const pctx = paper.getContext("2d"), octx = overlay.getContext("2d");
+const skel = $("skel"), sctx = skel.getContext("2d");
+const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+// Part of the camera frame that maps to the whole screen. A margin makes it
+// easier to reach the screen edges, because the hand leaves the frame early.
+const MARGIN = 0.12;
+
+let color = COLORS[0], sizeIdx = 1;
+let strokes = [], current = null;
+let landmarker = null, lastVideoTime = -1;
+let pos = null, drawing = false, lost = 0;
+let W = 0, H = 0, DPR = 1;
+
+/* ---------- toolbar ---------- */
+for (const c of COLORS) {
+  const b = document.createElement("button");
+  b.className = "sw"; b.type = "button"; b.style.background = c;
+  b.setAttribute("aria-label", "Barva " + c);
+  b.setAttribute("aria-pressed", c === color ? "true" : "false");
+  b.onclick = () => {
+    color = c;
+    document.querySelectorAll(".sw").forEach((x) => x.setAttribute("aria-pressed", x === b ? "true" : "false"));
+  };
+  $("colors").appendChild(b);
+}
+$("size").onclick = () => {
+  sizeIdx = (sizeIdx + 1) % SIZES.length;
+  $("size").textContent = "Tloušťka: " + SIZES[sizeIdx][0];
+};
+$("undo").onclick = () => { strokes.pop(); redraw(); };
+$("clear").onclick = () => { strokes = []; current = null; redraw(); };
+$("camtoggle").onclick = () => {
+  const on = $("pip").classList.toggle("hidden");
+  $("camtoggle").setAttribute("aria-pressed", on ? "false" : "true");
+};
+$("save").onclick = saveImage;
+
+/* ---------- canvas sizing ---------- */
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 3);
+  W = window.innerWidth; H = window.innerHeight;
+  for (const c of [paper, overlay]) {
+    c.width = Math.round(W * DPR); c.height = Math.round(H * DPR);
+    c.getContext("2d").setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  redraw();
+}
+window.addEventListener("resize", resize);
+
+function redraw() {
+  pctx.clearRect(0, 0, W, H);
+  for (const s of strokes) drawStroke(s);
+}
+function drawStroke(s) {
+  if (!s.pts.length) return;
+  pctx.strokeStyle = s.color; pctx.fillStyle = s.color;
+  pctx.lineWidth = s.size; pctx.lineCap = "round"; pctx.lineJoin = "round";
+  if (s.pts.length === 1) {
+    pctx.beginPath(); pctx.arc(s.pts[0].x, s.pts[0].y, s.size / 2, 0, Math.PI * 2); pctx.fill();
+    return;
+  }
+  pctx.beginPath(); pctx.moveTo(s.pts[0].x, s.pts[0].y);
+  for (let i = 1; i < s.pts.length - 1; i++) {
+    const mx = (s.pts[i].x + s.pts[i + 1].x) / 2, my = (s.pts[i].y + s.pts[i + 1].y) / 2;
+    pctx.quadraticCurveTo(s.pts[i].x, s.pts[i].y, mx, my);
+  }
+  const last = s.pts[s.pts.length - 1];
+  pctx.lineTo(last.x, last.y); pctx.stroke();
+}
+function addPoint(p) {
+  const pts = current.pts, prev = pts[pts.length - 1];
+  pts.push(p);
+  pctx.strokeStyle = current.color; pctx.lineWidth = current.size;
+  pctx.lineCap = "round"; pctx.lineJoin = "round";
+  pctx.beginPath();
+  if (prev) { pctx.moveTo(prev.x, prev.y); pctx.lineTo(p.x, p.y); }
+  else { pctx.moveTo(p.x, p.y); pctx.lineTo(p.x + 0.01, p.y); }
+  pctx.stroke();
+}
+
+/* ---------- camera point -> screen point (mirrored, with edge margin) ---------- */
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+function toScreen(lm) {
+  const nx = clamp01(((1 - lm.x) - MARGIN) / (1 - 2 * MARGIN));
+  const ny = clamp01((lm.y - MARGIN) / (1 - 2 * MARGIN));
+  return { x: nx * W, y: ny * H };
+}
+
+/* ---------- hand skeleton in the small preview ---------- */
+function drawSkeleton(hand, pinching) {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (skel.width !== vw || skel.height !== vh) { skel.width = vw; skel.height = vh; }
+  sctx.clearRect(0, 0, vw, vh);
+  if (!hand) return;
+  sctx.lineWidth = Math.max(2, vw / 160);
+  sctx.strokeStyle = pinching ? "#3ddc84" : "rgba(255,255,255,.9)";
+  sctx.beginPath();
+  for (const [a, b] of BONES) { sctx.moveTo(hand[a].x * vw, hand[a].y * vh); sctx.lineTo(hand[b].x * vw, hand[b].y * vh); }
+  sctx.stroke();
+  sctx.fillStyle = color;
+  for (const i of [4, 8]) { sctx.beginPath(); sctx.arc(hand[i].x * vw, hand[i].y * vh, sctx.lineWidth * 2.5, 0, Math.PI * 2); sctx.fill(); }
+}
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+/* ---------- status ---------- */
+function setStatus(state) {
+  const el = $("status");
+  el.className = state;
+  $("statustext").textContent =
+    state === "draw" ? "Kreslím" :
+    state === "hand" ? "Ruka nalezena — spoj palec a ukazovák" :
+    "Hledám ruku…";
+}
+
+/* ---------- main loop ---------- */
+function loop() {
+  requestAnimationFrame(loop);
+  if (!landmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+
+  const res = landmarker.detectForVideo(video, performance.now());
+  octx.clearRect(0, 0, W, H);
+
+  const hand = res.landmarks && res.landmarks[0];
+  drawSkeleton(hand, drawing);
+  if (!hand) {
+    if (++lost >= LOST_FRAMES) { endStroke(); pos = null; setStatus(""); }
+    return;
+  }
+  lost = 0;
+
+  const tip = toScreen(hand[8]), thumb = toScreen(hand[4]);
+  const handSize = dist(hand[0], hand[5]) || 1;
+  const pinch = dist(hand[4], hand[8]) / handSize;
+
+  // Brush point: middle of thumb and index tip while pinching feels more natural.
+  const target = { x: (tip.x * 2 + thumb.x) / 3, y: (tip.y * 2 + thumb.y) / 3 };
+  pos = pos ? { x: pos.x + (target.x - pos.x) * (1 - SMOOTH), y: pos.y + (target.y - pos.y) * (1 - SMOOTH) } : target;
+
+  if (!drawing && pinch < PINCH_ON) { drawing = true; current = { color, size: SIZES[sizeIdx][1], pts: [] }; strokes.push(current); }
+  else if (drawing && pinch > PINCH_OFF) endStroke();
+
+  if (drawing) addPoint({ x: pos.x, y: pos.y });
+  setStatus(drawing ? "draw" : "hand");
+
+  // Cursor
+  const r = SIZES[sizeIdx][1] / 2 + 6;
+  octx.lineWidth = 2;
+  octx.strokeStyle = drawing ? color : "rgba(255,255,255,.85)";
+  octx.beginPath(); octx.arc(pos.x, pos.y, r, 0, Math.PI * 2); octx.stroke();
+  if (!drawing) {
+    octx.fillStyle = color;
+    octx.beginPath(); octx.arc(pos.x, pos.y, 3, 0, Math.PI * 2); octx.fill();
+  }
+}
+function endStroke() { drawing = false; current = null; }
+
+/* ---------- save ---------- */
+async function saveImage() {
+  const out = document.createElement("canvas");
+  out.width = paper.width; out.height = paper.height;
+  const c = out.getContext("2d");
+  c.fillStyle = "#0d0f12"; c.fillRect(0, 0, out.width, out.height);
+  c.drawImage(paper, 0, 0);
+  out.toBlob(async (blob) => {
+    const file = new File([blob], "kresba.png", { type: "image/png" });
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; }
+    } catch (e) { if (e.name === "AbortError") return; }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = "kresba.png"; a.click();
+  }, "image/png");
+}
+
+/* ---------- start ---------- */
+$("go").onclick = async () => {
+  const go = $("go"), err = $("err");
+  go.disabled = true; err.textContent = "";
+  try {
+    go.textContent = "Spouštím kameru…";
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+
+    go.textContent = "Načítám model ruky…";
+    const files = await FilesetResolver.forVisionTasks(WASM);
+    const opts = (delegate) => ({
+      baseOptions: { modelAssetPath: MODEL, delegate },
+      runningMode: "VIDEO", numHands: 1,
+      minHandDetectionConfidence: 0.5, minHandPresenceConfidence: 0.5, minTrackingConfidence: 0.5
+    });
+    try { landmarker = await HandLandmarker.createFromOptions(files, opts("GPU")); }
+    catch { landmarker = await HandLandmarker.createFromOptions(files, opts("CPU")); }
+
+    $("start").hidden = true; $("bar").hidden = false; $("status").hidden = false; $("pip").hidden = false;
+    resize(); setStatus(""); loop();
+  } catch (e) {
+    go.disabled = false; go.textContent = "Zkusit znovu";
+    err.textContent = e && e.name === "NotAllowedError"
+      ? "Přístup ke kameře je zakázaný. Povol ho v Nastavení › Safari › Kamera a zkus to znovu."
+      : "Chyba: " + (e && e.message ? e.message : e);
+  }
+};
+resize();
+</script>
+</body>
+</html>
