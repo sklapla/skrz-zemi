@@ -307,10 +307,32 @@ async function saveImage() {
 }
 
 /* ---------- start ---------- */
+let step = "kamera";
+function withTimeout(promise, ms) {
+  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error("časový limit (" + ms / 1000 + " s)")), ms))]);
+}
+async function downloadModel(onProgress) {
+  const res = await fetch(MODEL);
+  if (!res.ok) throw new Error("model HTTP " + res.status);
+  const total = +res.headers.get("content-length") || 0;
+  if (!res.body || !total) return new Uint8Array(await res.arrayBuffer());
+  const reader = res.body.getReader(), parts = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value); got += value.length;
+    onProgress(Math.round(got / total * 100));
+  }
+  const out = new Uint8Array(got); let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
 $("go").onclick = async () => {
   const go = $("go"), err = $("err");
   go.disabled = true; err.textContent = "";
   try {
+    step = "kamera";
     go.textContent = "Spouštím kameru…";
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
@@ -318,15 +340,23 @@ $("go").onclick = async () => {
     video.srcObject = stream;
     await video.play();
 
-    go.textContent = "Načítám model ruky…";
-    const files = await FilesetResolver.forVisionTasks(WASM);
-    const opts = (delegate) => ({
-      baseOptions: { modelAssetPath: MODEL, delegate },
+    // Step 1: download the model ourselves, so we can show progress and see errors.
+    step = "stahování modelu";
+    const model = await withTimeout(downloadModel((p) => { go.textContent = "Stahuji model… " + p + " %"; }), 60000);
+
+    // Step 2: load the hand-tracking engine (WebAssembly).
+    step = "načítání enginu";
+    go.textContent = "Načítám engine…";
+    const files = await withTimeout(FilesetResolver.forVisionTasks(WASM), 30000);
+
+    // Step 3: start the model. CPU only: the GPU mode can freeze on iPhone without an error.
+    step = "spuštění modelu";
+    go.textContent = "Spouštím model…";
+    landmarker = await withTimeout(HandLandmarker.createFromOptions(files, {
+      baseOptions: { modelAssetBuffer: model, delegate: "CPU" },
       runningMode: "VIDEO", numHands: 1,
       minHandDetectionConfidence: 0.5, minHandPresenceConfidence: 0.5, minTrackingConfidence: 0.5
-    });
-    try { landmarker = await HandLandmarker.createFromOptions(files, opts("GPU")); }
-    catch { landmarker = await HandLandmarker.createFromOptions(files, opts("CPU")); }
+    }), 30000);
 
     $("start").hidden = true; $("bar").hidden = false; $("status").hidden = false; $("pip").hidden = false;
     resize(); setStatus(""); loop();
@@ -334,7 +364,7 @@ $("go").onclick = async () => {
     go.disabled = false; go.textContent = "Zkusit znovu";
     err.textContent = e && e.name === "NotAllowedError"
       ? "Přístup ke kameře je zakázaný. Povol ho v Nastavení › Safari › Kamera a zkus to znovu."
-      : "Chyba: " + (e && e.message ? e.message : e);
+      : "Chyba při kroku „" + step + "“: " + (e && e.message ? e.message : e);
   }
 };
 resize();
