@@ -74,6 +74,7 @@ button:focus-visible { outline: 2px solid var(--live); outline-offset: 2px; }
 #go { font: 700 17px var(--ui); padding: 14px 28px; border-radius: 12px; border: 0; background: var(--fg); color: var(--bg); cursor: pointer; }
 #go:disabled { opacity: .5; }
 #err { color: var(--warn); margin-top: 16px; max-width: 34ch; }
+#log { font: 11px/1.4 ui-monospace, Menlo, monospace; color: var(--muted); text-align: left; max-width: 40ch; margin: 16px auto 0; white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -111,13 +112,15 @@ button:focus-visible { outline: 2px solid var(--live); outline-offset: 2px; }
     </ol>
     <button id="go" type="button">Spustit kameru</button>
     <div id="err"></div>
+    <div id="log"></div>
+    <div id="tick" style="color:var(--muted);font-size:12px;margin-top:8px"></div>
   </div>
 </div>
 
 <script type="module">
-import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/vision_bundle.mjs";
 
-const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm";
 const MODEL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 
 const COLORS = ["#ffffff", "#ff5a4e", "#ffc23d", "#3ddc84", "#3db8ff", "#b77cff"];
@@ -308,6 +311,11 @@ async function saveImage() {
 
 /* ---------- start ---------- */
 let step = "kamera";
+const t0 = performance.now();
+function log(msg) {
+  const t = ((performance.now() - t0) / 1000).toFixed(1);
+  $("log").textContent += t + " s  " + msg + "\n";
+}
 function withTimeout(promise, ms) {
   return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error("časový limit (" + ms / 1000 + " s)")), ms))]);
 }
@@ -328,36 +336,56 @@ async function downloadModel(onProgress) {
   for (const p of parts) { out.set(p, o); o += p.length; }
   return out;
 }
+let beat = null;
 $("go").onclick = async () => {
+  clearInterval(beat);
+  beat = setInterval(() => { $("tick").textContent = "Stránka běží: " + ((performance.now() - t0) / 1000).toFixed(0) + " s"; }, 1000);
   const go = $("go"), err = $("err");
   go.disabled = true; err.textContent = "";
   try {
     step = "kamera";
+    log("start, " + navigator.userAgent.match(/OS [\d_]+/)?.[0]);
     go.textContent = "Spouštím kameru…";
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
     });
     video.srcObject = stream;
     await video.play();
+    log("kamera OK " + video.videoWidth + "×" + video.videoHeight);
 
     // Step 1: download the model ourselves, so we can show progress and see errors.
     step = "stahování modelu";
     const model = await withTimeout(downloadModel((p) => { go.textContent = "Stahuji model… " + p + " %"; }), 60000);
+    log("model OK " + Math.round(model.length / 1024) + " kB");
 
     // Step 2: load the hand-tracking engine (WebAssembly).
     step = "načítání enginu";
     go.textContent = "Načítám engine…";
     const files = await withTimeout(FilesetResolver.forVisionTasks(WASM), 30000);
+    log("engine OK " + (files.wasmBinaryPath || "").split("/").pop());
 
-    // Step 3: start the model. CPU only: the GPU mode can freeze on iPhone without an error.
+    // Step 3: start the model. Give it its own normal canvas: on iPhone the
+    // default offscreen canvas can freeze. Try CPU first, then GPU.
     step = "spuštění modelu";
-    go.textContent = "Spouštím model…";
-    landmarker = await withTimeout(HandLandmarker.createFromOptions(files, {
-      baseOptions: { modelAssetBuffer: model, delegate: "CPU" },
-      runningMode: "VIDEO", numHands: 1,
-      minHandDetectionConfidence: 0.5, minHandPresenceConfidence: 0.5, minTrackingConfidence: 0.5
-    }), 30000);
+    for (const delegate of ["CPU", "GPU"]) {
+      go.textContent = "Spouštím model (" + delegate + ")…";
+      log("model start " + delegate);
+      try {
+        landmarker = await withTimeout(HandLandmarker.createFromOptions(files, {
+          canvas: document.createElement("canvas"),
+          baseOptions: { modelAssetBuffer: model, delegate },
+          runningMode: "VIDEO", numHands: 1,
+          minHandDetectionConfidence: 0.5, minHandPresenceConfidence: 0.5, minTrackingConfidence: 0.5
+        }), 20000);
+        log("model OK " + delegate);
+        break;
+      } catch (e) {
+        log("model " + delegate + " chyba: " + (e && e.message ? e.message : e));
+      }
+    }
+    if (!landmarker) throw new Error("model se nespustil ani v CPU, ani v GPU režimu");
 
+    clearInterval(beat);
     $("start").hidden = true; $("bar").hidden = false; $("status").hidden = false; $("pip").hidden = false;
     resize(); setStatus(""); loop();
   } catch (e) {
